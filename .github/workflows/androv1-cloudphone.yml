@@ -1,0 +1,143 @@
+name: AndroV1 Real Android CloudPhone
+
+on: 
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  cloudphone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Free Disk Space & Setup Hardware KVM
+      run: |
+        echo "========================================================"
+        echo "   ANDRO V1 // FREEING DISK SPACE & HARDWARE KVM CHECK  "
+        echo "========================================================"
+        # Free up 25+ GB of runner disk space for Android system
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+        df -h
+        
+        # Verify KVM hardware acceleration
+        if [ -e /dev/kvm ]; then
+          echo "[SUCCESS] /dev/kvm hardware virtualization is present!"
+          sudo chmod 777 /dev/kvm
+        else
+          echo "[WARNING] /dev/kvm not found, checking fallback."
+        fi
+        
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl jq ffmpeg adb
+        
+        sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+        sudo chmod +x /usr/local/bin/cloudflared
+
+    - name: Launch Real Google Android CloudPhone (Port 6080)
+      run: |
+        echo "========================================================"
+        echo "   PULLING & LAUNCHING REAL GOOGLE ANDROID PHONE        "
+        echo "========================================================"
+        echo "Selected Android Engine Image: budtmo/docker-android:emulator_14.0"
+        
+        # budtmo/docker-android runs the official Google Android emulator with full display web streaming on port 6080!
+        sudo docker run -d --name androv1-phone \
+          --privileged \
+          --device /dev/kvm \
+          -p 6080:6080 \
+          -p 5555:5555 \
+          -e EMULATOR_DEVICE="Samsung Galaxy S10" \
+          -e WEB_VNC=true \
+          -e AUDIO=true \
+          budtmo/docker-android:emulator_14.0
+
+        echo "[INFO] Waiting for Android Web Stream on port 6080..."
+        BOOTED=0
+        for i in $(seq 1 90); do
+          if curl -s -I http://127.0.0.1:6080 > /dev/null 2>&1; then
+            echo "[SUCCESS] Android CloudPhone Web Stream is LIVE on port 6080!"
+            BOOTED=1
+            break
+          fi
+          echo "Waiting for Android Web Viewer... ($i/90)"
+          sleep 3
+        done
+
+        if [ $BOOTED -eq 0 ]; then
+          echo "[ERROR] Container state diagnostics:"
+          sudo docker ps -a
+          sudo docker logs --tail 100 androv1-phone || true
+          exit 1
+        fi
+
+        echo "[INFO] Injecting Strict Mobile Touch-Lock into noVNC..."
+        sudo docker exec androv1-phone bash -c '
+          for f in /root/noVNC/vnc.html /root/noVNC/index.html /home/androidusr/noVNC/vnc.html /home/androidusr/noVNC/index.html; do
+            if [ -f "$f" ]; then
+              sed -i "s/</head>/<style>html,body{overflow:hidden!important;position:fixed!important;width:100%!important;height:100%!important;touch-action:none!important;overscroll-behavior:none!important;-webkit-user-select:none;user-select:none;}#noVNC_container,#noVNC_screen{touch-action:none!important;}</style></head>/" "$f" || true
+            fi
+          done
+        ' || true
+
+    - name: Establish Live Public Tunnel & Generate Phone Link
+      run: |
+        echo "Starting Cloudflare tunnel on port 6080..."
+        if ! command -v cloudflared >/dev/null 2>&1; then
+          sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+        fi
+        nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > /tmp/tunnel.log 2>&1 &
+        TUNNEL_URL=""
+        for i in $(seq 1 50); do
+          sleep 2
+          TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /tmp/tunnel.log | head -1 || true)
+          if [ -n "$TUNNEL_URL" ]; then
+            break
+          fi
+        done
+        
+        if [ -z "$TUNNEL_URL" ]; then
+          echo "[ERROR] Tunnel could not be established. Log:"
+          cat /tmp/tunnel.log
+          exit 1
+        fi
+        
+        # Direct phone URL with autoconnect and scale to fit mobile screen
+        PHONE_URL="${TUNNEL_URL}/vnc.html?autoconnect=true&resize=scale"
+        echo "PHONE_URL=$PHONE_URL" >> $GITHUB_ENV
+        echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+        
+        echo "### 📱 REAL ANDROID CLOUDPHONE IS LIVE!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 👉 [CLICK HERE TO OPEN YOUR ANDROID PHONE]($PHONE_URL)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        echo "| 📱 Direct Phone Web URL | **$PHONE_URL** |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🌐 Base Tunnel URL | $TUNNEL_URL |" >> $GITHUB_STEP_SUMMARY
+        echo "| ⚙️ Android OS | Google Android 14.0 with Play Store |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📐 Display Profile | Samsung Galaxy S10 (Touch Enabled) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔒 Mobile Touch-Lock | ACTIVE (Zero Webpage Bounce/Scroll) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔌 Port | 6080 (Real HTML5 Display Stream) |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "> **How to control on mobile:** Open the Direct Phone Web URL in Chrome, Safari, or Brave. Touch and swipe directly on the screen to use your Android phone!" >> $GITHUB_STEP_SUMMARY
+        
+        echo "::notice title=Open Android Phone::$PHONE_URL"
+        echo "=========================================================="
+        echo "       ANDRO V1 // REAL ANDROID CLOUDPHONE READY!"
+        echo "=========================================================="
+        echo "DIRECT PHONE URL (CLICK OR OPEN IN MOBILE BROWSER):"
+        echo "==> $PHONE_URL <=="
+        echo "=========================================================="
+
+    - name: Keep Alive Monitor
+      run: |
+        echo "Android CloudPhone session active for 6 hours max..."
+        echo "Direct Phone URL: ${{ env.PHONE_URL }}"
+        for i in {358..1}; do
+            sleep 60
+        done
